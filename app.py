@@ -864,8 +864,6 @@ def analyze_tripmods_with_gtfs(gtfs: GtfsStatic, ents: List[TripModEntity]) -> T
         ))
     return reports, totals
 
-
-# 8) Folium — carte (détour ROUGE) + originel (VERT) + arrêts originels (BLANC/vert/rouge) + replacements (ROSE) + segments ajoutés/annulés
 # 8) Folium — carte (détour ROUGE) + originel (VERT) + arrêts originels (BLANC/vert/rouge) + replacements (ROSE) + segments ajoutés/annulés
 def build_folium_map_for_polyline(
     poly: List[Tuple[float, float]],
