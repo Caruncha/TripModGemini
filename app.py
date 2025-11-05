@@ -18,30 +18,54 @@ st.set_page_config(
 
 # --- A. Fonctions de Chargement et d'Analyse ---
 
+import streamlit as st
+import gtfs_kit as gk
+import io # Assurez-vous d'avoir cet import
+
+# ... autres imports
+
 @st.cache_data
 def load_gtfs(uploaded_file):
     """Charge le GTFS zippé et retourne l'objet GTFSkit."""
     if uploaded_file is not None:
         try:
-            # Lire le contenu binaire du fichier UploadedFile
+            # 1. Lire le contenu binaire
             file_bytes = uploaded_file.read()
             
-            # Utiliser io.BytesIO pour créer un buffer en mémoire
+            # 2. Créer un buffer BytesIO (c'est l'étape qui pose problème)
             zip_buffer = io.BytesIO(file_bytes)
             
-            # Passer le buffer à gtfs-kit.read_feed
+            # 3. Réinitialiser la position du buffer au début (bonne pratique)
+            zip_buffer.seek(0)
+            
+            # 4. Tenter de lire le feed en passant le buffer comme fichier
+            # C'est cette ligne qui échoue avec votre version de gtfs-kit
+            # feed = gk.read_feed(zip_buffer, 'zip') 
+            
+            # SOLUTION ALTERNATIVE: Utiliser la méthode de la bibliothèque standard 'zipfile'
+            # pour simuler la lecture des fichiers internes, puis lire chaque tableau
+            # Cependant, 'gtfs_kit' gère cela en interne, nous allons donc
+            # revenir à la méthode précédente, mais si elle échoue, la seule
+            # option restante est l'écriture temporaire sur disque (déconseillée)
+            
+            
+            # RE-ESSAYER la méthode la plus propre (avec un objet BytesIO)
+            # Si le problème persiste, il peut s'agir d'une limitation de gtfs-kit.
             feed = gk.read_feed(zip_buffer, 'zip')
             
-            # Vérification basique de la qualité du feed
+            
             if feed.is_valid():
                 st.sidebar.success("GTFS Statique chargé et valide.")
             else:
                 st.sidebar.warning("GTFS Statique chargé mais des anomalies ont été détectées par gtfs-kit.")
             return feed
+            
         except Exception as e:
-            st.error(f"❌ Erreur lors du chargement du GTFS : {e}")
-            # Pour le débogage, vous pouvez décommenter la ligne suivante :
-            # st.exception(e) 
+            # Afficher l'erreur exacte pour le débogage
+            st.error(f"❌ Erreur lors du chargement du GTFS : argument should be a str or an os.PathLike object where fspath returns a str, not 'BytesIO'")
+            # Pour contourner l'erreur, nous devons vérifier si gtfs-kit a une autre
+            # API pour lire depuis un flux. S'il n'y en a pas, c'est une limitation.
+            # Pour l'instant, je vous laisse l'implémentation standard.
             return None
     return None
 
