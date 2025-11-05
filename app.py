@@ -812,14 +812,42 @@ def _seq_from_selector(sel: StopSelector, stop_times_list: List[Dict[str, str]])
                 except Exception: return None
     return None
 
-def analyze_tripmods_with_gtfs(gtfs: GtfsStatic, ents: List[TripModEntity]) -> Tuple[List[EntityReport], Dict[str, int]]:
+def _is_poly_anormal(coords: List[Tuple[float,float]]) -> bool:
+    if not coords or len(coords) < 2: return True
+    lats = [la for la,_ in coords]; lons = [lo for _,lo in coords]
+    return (max(lats)-min(lats) + max(lons)-min(lons)) < 1e-4
+
+# *** (DEBUT) SECTION REFACTORISÉE ET CORRIGÉE ***
+
+def analyze_and_prep_views(gtfs: GtfsStatic, ents: List[TripModEntity], rt_shapes: RtShapes) -> Dict[str, Any]:
+    """
+    Fonction unique qui effectue l'analyse et prépare tous les dictionnaires
+    nécessaires pour l'affichage, en corrigeant l'erreur objet/dict.
+    """
     reports: List[EntityReport] = []
     totals = dict(total_entities=len(ents), total_trip_ids=0, total_modifications=0,
                   missing_trip_ids=0, invalid_selectors=0, unknown_replacement_stops=0)
+    
+    # Dictionnaires pour les vues
+    details_tables_by_entity: Dict[str, List[Dict[str, Any]]] = {}
+    temp_stops_points_by_entity: Dict[str, List[List[Any]]] = {}
+    shape_for_plot_by_entity: Dict[str, Optional[str]] = {}
+    original_poly_by_entity: Dict[str, List[List[float]]] = {}
+    original_shape_id_by_entity: Dict[str, Optional[str]] = {}
+    original_stop_points_by_entity: Dict[str, List[List[Any]]] = {}
+    original_stop_ids_by_entity: Dict[str, List[str]] = {}
+    added_segments_by_entity: Dict[str, List[List[List[float]]]] = {}
+    canceled_segments_by_entity: Dict[str, List[List[List[float]]]] = {}
+
+    stops_info = getattr(gtfs, "stops_info", {}) or {}
+    shapes_pts = getattr(gtfs, "shapes_points", {}) or {}
+
+    # Étape 1: Analyse (similaire à l'ancien analyze_tripmods_with_gtfs)
     for e in ents:
         trip_checks: List[TripCheck] = []
         repl_unknown: List[str] = []
         tot_trip_ids = sum(len(sel.trip_ids) for sel in e.selected_trips)
+        
         for sel in e.selected_trips:
             for trip_id in sel.trip_ids:
                 exists = trip_id in gtfs.trips
@@ -827,6 +855,7 @@ def analyze_tripmods_with_gtfs(gtfs: GtfsStatic, ents: List[TripModEntity]) -> T
                 start_ok = end_ok = False
                 start_seq = end_seq = None
                 notes: List[str] = []
+                
                 if not exists:
                     notes.append("trip_id absent du GTFS (filtré ou inexistant)")
                     totals["missing_trip_ids"] += 1
@@ -841,19 +870,23 @@ def analyze_tripmods_with_gtfs(gtfs: GtfsStatic, ents: List[TripModEntity]) -> T
                             totals["invalid_selectors"] += 1
                         else:
                             start_ok = True; end_ok = True
+                            
                 trip_checks.append(TripCheck(
                     trip_id=trip_id, exists_in_gtfs=exists,
                     start_seq_valid=start_ok, end_seq_valid=end_ok,
                     start_seq=start_seq, end_seq=end_seq, notes=notes
                 ))
+                
         for m in e.modifications:
             for rs in m.replacement_stops:
                 sid = rs.stop_id
                 if sid and sid not in gtfs.stops_present:
                     repl_unknown.append(sid)
                     totals["unknown_replacement_stops"] += 1
+                    
         totals["total_trip_ids"] += tot_trip_ids
         totals["total_modifications"] += len(e.modifications)
+        
         reports.append(EntityReport(
             entity_id=e.entity_id,
             total_selected_trip_ids=tot_trip_ids,
@@ -862,7 +895,165 @@ def analyze_tripmods_with_gtfs(gtfs: GtfsStatic, ents: List[TripModEntity]) -> T
             trips=trip_checks,
             replacement_stops_unknown_in_gtfs=sorted(set(repl_unknown))
         ))
-    return reports, totals
+
+    # Étape 2: Préparation des données pour la vue (similaire à l'ancien cache_views)
+    for r in reports:
+        ent_id = r.entity_id
+        ent_obj = next((e for e in ents if e.entity_id == ent_id), None)
+        if not ent_obj or not ent_obj.modifications:
+            continue
+
+        shape_ids_in_entity = [s.shape_id for s in ent_obj.selected_trips if s.shape_id]
+        shape_id_for_plot = next((sid for sid in shape_ids_in_entity if sid in rt_shapes.shapes), None)
+        shape_for_plot_by_entity[ent_id] = shape_id_for_plot
+
+        if shape_id_for_plot:
+            add_segs = rt_shapes.added_segments.get(shape_id_for_plot, [])
+            can_segs = rt_shapes.canceled_segments.get(shape_id_for_plot, [])
+            added_segments_by_entity[ent_id] = [[[la, lo] for (la, lo) in seg] for seg in add_segs]
+            canceled_segments_by_entity[ent_id] = [[[la, lo] for (la, lo) in seg] for seg in can_segs]
+        else:
+            added_segments_by_entity[ent_id] = []
+            canceled_segments_by_entity[ent_id] = []
+
+        trip_counts: Dict[str, int] = {}
+        for s in ent_obj.selected_trips:
+            for tid in s.trip_ids:
+                trip_counts[tid] = trip_counts.get(tid, 0) + 1
+        mixed_shapes = len({sid for sid in shape_ids_in_entity if sid}) > 1
+        detail_rows: List[Dict[str, Any]] = []
+        chosen_original_shape_id: Optional[str] = None
+        chosen_original_trip_id: Optional[str] = None
+
+        # C'est ici que l'erreur se produisait.
+        # 'r.trips' est une List[TripCheck] (objet), donc 't' est un objet.
+        for t in r.trips:
+            # *** CORRECTION: Utiliser t.attribut au lieu de t['attribut'] ***
+            
+            st_list = gtfs.stop_times.get(t.trip_id, [])
+            stop_times_count = len(st_list)
+
+            trip_shape_id = None
+            for s in ent_obj.selected_trips:
+                if t.trip_id in s.trip_ids and s.shape_id:
+                    trip_shape_id = s.shape_id
+                    break
+            if not trip_shape_id and shape_ids_in_entity:
+                trip_shape_id = shape_ids_in_entity[0]
+
+            poly = rt_shapes.shapes.get(trip_shape_id, []) if trip_shape_id else []
+            poly_points = len(poly)
+            poly_anormal = _is_poly_anormal(poly)
+
+            selectors_incomplets = not (t.start_seq_valid and t.end_seq_valid)
+            ordre_ok = ""
+            ecart_seq = ""
+            if (t.start_seq is not None) and (t.end_seq is not None):
+                ordre_ok = "oui" if t.start_seq <= t.end_seq else "non"
+                try:
+                    ecart_seq = int(t.end_seq) - int(t.start_seq)
+                except Exception:
+                    ecart_seq = ""
+
+            duplicate_trip = trip_counts.get(t.trip_id, 0) > 1
+            
+            detail_rows.append({
+                "trip_id": t.trip_id,
+                "existe dans GTFS": "oui" if t.exists_in_gtfs else "non",
+                "start_seq": t.start_seq if t.start_seq is not None else "",
+                "end_seq": t.end_seq if t.end_seq is not None else "",
+                "selectors OK": "oui" if (t.start_seq_valid and t.end_seq_valid) else "non",
+                "notes": "; ".join(t.notes) if t.notes else "",
+                "shape_id (trip)": trip_shape_id or "",
+                "shape dispo": "oui" if (trip_shape_id and poly_points >= 2) else "non",
+                "pts polyline": poly_points,
+                "polyline anormale": "oui" if poly_anormal else "non",
+                "stop_times (nb)": stop_times_count,
+                "ordre start<=end": ordre_ok,
+                "écart seq": ecart_seq,
+                "selectors incomplets": "oui" if selectors_incomplets else "non",
+                "trip en double (entité)": "oui" if duplicate_trip else "non",
+                "mixed shapes (entité)": "oui" if mixed_shapes else "non",
+            })
+
+            if chosen_original_shape_id is None and t.exists_in_gtfs:
+                trip_row = gtfs.trips.get(t.trip_id, {})
+                static_sid = (trip_row.get('shape_id') or '').strip()
+                if static_sid and static_sid in shapes_pts and len(shapes_pts.get(static_sid, [])) >= 2:
+                    chosen_original_shape_id = static_sid
+                    chosen_original_trip_id = t.trip_id
+
+        details_tables_by_entity[ent_id] = detail_rows
+
+        tmp_points: List[List[Any]] = []
+        seen_keys: Set[Tuple[float, float, str]] = set()
+        for m in ent_obj.modifications:
+            for rs in m.replacement_stops:
+                label = (rs.id or rs.stop_id or "").strip()
+                la = rs.stop_lat
+                lo = rs.stop_lon
+                if (la is None or lo is None) and rs.stop_id:
+                    info = stops_info.get(rs.stop_id)
+                    if info:
+                        la = info.get("lat"); lo = info.get("lon")
+                if la is None or lo is None:
+                    continue
+                key = (round(la, 7), round(lo, 7), label)
+                if key in seen_keys:
+                    continue
+                tmp_points.append([la, lo, label if label else "replacement_stop"])
+                seen_keys.add(key)
+        temp_stops_points_by_entity[ent_id] = tmp_points
+
+        if chosen_original_shape_id:
+            orig = shapes_pts.get(chosen_original_shape_id, [])
+            original_poly_by_entity[ent_id] = [[la, lo] for (la, lo) in orig]
+            original_shape_id_by_entity[ent_id] = chosen_original_shape_id
+        else:
+            original_poly_by_entity[ent_id] = []
+            original_shape_id_by_entity[ent_id] = None
+
+        orig_pts: List[List[Any]] = []
+        orig_ids: List[str] = []
+        if chosen_original_trip_id:
+            st_list_for_orig = gtfs.stop_times.get(chosen_original_trip_id, [])
+            for rec in st_list_for_orig:
+                sid = (rec.get('stop_id') or '').strip()
+                if not sid:
+                    continue
+                info = stops_info.get(sid)
+                if not info:
+                    continue
+                la, lo = info.get("lat"), info.get("lon")
+                if la is None or lo is None:
+                    continue
+                orig_pts.append([la, lo, sid])
+                orig_ids.append(sid)
+        original_stop_points_by_entity[ent_id] = orig_pts
+        original_stop_ids_by_entity[ent_id] = orig_ids
+
+    # Conversion finale pour le JSON
+    reports_plain = [asdict(r) for r in reports]
+    shapes_plain: Dict[str, List[List[float]]] = {
+        sid: [[la, lo] for (la, lo) in coords] for sid, coords in rt_shapes.shapes.items()
+    }
+
+    return {
+        "reports": reports_plain,
+        "totals": totals,
+        "details_tables_by_entity": details_tables_by_entity,
+        "temp_stops_points_by_entity": temp_stops_points_by_entity,
+        "shape_for_plot_by_entity": shape_for_plot_by_entity,
+        "shapes_plain": shapes_plain,
+        "original_poly_by_entity": original_poly_by_entity,
+        "original_shape_id_by_entity": original_shape_id_by_entity,
+        "original_stop_points_by_entity": original_stop_points_by_entity,
+        "original_stop_ids_by_entity": original_stop_ids_by_entity,
+        "added_segments_by_entity": added_segments_by_entity,
+        "canceled_segments_by_entity": canceled_segments_by_entity,
+    }
+
+# *** (FIN) SECTION REFACTORISÉE ET CORRIGÉE ***
 
 
 # 8) Folium — carte (détour ROUGE) + originel (VERT) + arrêts originels (BLANC/vert/rouge) + replacements (ROSE) + segments ajoutés/annulés
@@ -1063,200 +1254,29 @@ def cache_views(tripmods_bytes: bytes, gtfs_bytes: bytes, decode_flag: str, sche
     present_trip_ids = sorted(gtfs.trips.keys())
     missing_trip_ids = sorted(set(tid_sorted) - set(present_trip_ids))
 
-    # 3) Analyse
-    reports, totals = analyze_tripmods_with_gtfs(gtfs, ents)
-    reports_plain = [asdict(r) for r in reports]
-    total_shapes = len(rt_shapes.shapes)
+    # 3) Analyse ET Préparation des Vues (fonction fusionnée et corrigée)
+    analysis_results = analyze_and_prep_views(gtfs, ents, rt_shapes)
 
-    # 4) Prépare les vues “Détails”
-    details_tables_by_entity: Dict[str, List[Dict[str, Any]]] = {}
-    temp_stops_points_by_entity: Dict[str, List[List[Any]]] = {}
-    shape_for_plot_by_entity: Dict[str, Optional[str]] = {}
-    original_poly_by_entity: Dict[str, List[List[float]]] = {}
-    original_shape_id_by_entity: Dict[str, Optional[str]] = {}
-    original_stop_points_by_entity: Dict[str, List[List[Any]]] = {}
-    original_stop_ids_by_entity: Dict[str, List[str]] = {}
-    added_segments_by_entity: Dict[str, List[List[List[float]]]] = {}
-    canceled_segments_by_entity: Dict[str, List[List[List[float]]]] = {}
-
-    def _is_poly_anormal(coords: List[Tuple[float,float]]) -> bool:
-        if not coords or len(coords) < 2: return True
-        lats = [la for la,_ in coords]; lons = [lo for _,lo in coords]
-        return (max(lats)-min(lats) + max(lons)-min(lons)) < 1e-4
-
-    stops_info = getattr(gtfs, "stops_info", {}) or {}
-    shapes_pts = getattr(gtfs, "shapes_points", {}) or {}
-
-    for r in reports_plain:  # <-- Utiliser reports_plain (la liste de dicts)
-        ent_id = r['entity_id']  # <-- Accès par clé
-        ent_obj = next((e for e in ents if e.entity_id == ent_id), None)
-        if not ent_obj or not ent_obj.modifications:
-            continue
-
-        shape_ids_in_entity = [s.shape_id for s in ent_obj.selected_trips if s.shape_id]
-        shape_id_for_plot = next((sid for sid in shape_ids_in_entity if sid in rt_shapes.shapes), None)
-        shape_for_plot_by_entity[ent_id] = shape_id_for_plot
-
-        # Segments ajoutés/annulés pour la shape RT retenue
-        if shape_id_for_plot:
-            add_segs = rt_shapes.added_segments.get(shape_id_for_plot, [])
-            can_segs = rt_shapes.canceled_segments.get(shape_id_for_plot, [])
-            added_segments_by_entity[ent_id] = [[[la, lo] for (la, lo) in seg] for seg in add_segs]
-            canceled_segments_by_entity[ent_id] = [[[la, lo] for (la, lo) in seg] for seg in can_segs]
-        else:
-            added_segments_by_entity[ent_id] = []
-            canceled_segments_by_entity[ent_id] = []
-
-        # Tableau diagnostics
-        trip_counts: Dict[str, int] = {}
-        for s in ent_obj.selected_trips:
-            for tid in s.trip_ids:
-                trip_counts[tid] = trip_counts.get(tid, 0) + 1
-        mixed_shapes = len({sid for sid in shape_ids_in_entity if sid}) > 1
-        detail_rows: List[Dict[str, Any]] = []
-
-        chosen_original_shape_id: Optional[str] = None
-        chosen_original_trip_id: Optional[str] = None
-
-        # r.trips est une liste de dict (asdict sur dataclasses)
-        for t in r['trips']:  # <-- Accès par clé
-            st_list = gtfs.stop_times.get(t['trip_id'], [])
-            stop_times_count = len(st_list)
-
-            trip_shape_id = None
-            for s in ent_obj.selected_trips:
-                if t['trip_id'] in s.trip_ids and s.shape_id:
-                    trip_shape_id = s.shape_id
-                    break
-            if not trip_shape_id and shape_ids_in_entity:
-                trip_shape_id = shape_ids_in_entity[0]
-
-            poly = rt_shapes.shapes.get(trip_shape_id, []) if trip_shape_id else []
-            poly_points = len(poly)
-            poly_anormal = _is_poly_anormal(poly)
-
-            selectors_incomplets = not (t.get('start_seq_valid') and t.get('end_seq_valid'))
-            ordre_ok = ""
-            ecart_seq = ""
-            if (t.get('start_seq') is not None) and (t.get('end_seq') is not None):
-                ordre_ok = "oui" if t.get('start_seq') <= t.get('end_seq') else "non"
-                try:
-                    ecart_seq = int(t.get('end_seq')) - int(t.get('start_seq'))
-                except Exception:
-                    ecart_seq = ""
-
-            duplicate_trip = trip_counts.get(t['trip_id'], 0) > 1
-            detail_rows.append({
-                "trip_id": t['trip_id'],
-                "existe dans GTFS": "oui" if t['exists_in_gtfs'] else "non",
-                "start_seq": t.get('start_seq') if t.get('start_seq') is not None else "",
-                "end_seq": t.get('end_seq') if t.get('end_seq') is not None else "",
-                "selectors OK": "oui" if (t.get('start_seq_valid') and t.get('end_seq_valid')) else "non",
-                "notes": "; ".join(t.get('notes', [])) if t.get('notes') else "",
-                "shape_id (trip)": trip_shape_id or "",
-                "shape dispo": "oui" if (trip_shape_id and poly_points >= 2) else "non",
-                "pts polyline": poly_points,
-                "polyline anormale": "oui" if poly_anormal else "non",
-                "stop_times (nb)": stop_times_count,
-                "ordre start<=end": ordre_ok,
-                "écart seq": ecart_seq,
-                "selectors incomplets": "oui" if selectors_incomplets else "non",
-                "trip en double (entité)": "oui" if duplicate_trip else "non",
-                "mixed shapes (entité)": "oui" if mixed_shapes else "non",
-            })
-
-            if chosen_original_shape_id is None and t['exists_in_gtfs']:
-                trip_row = gtfs.trips.get(t['trip_id'], {})
-                static_sid = (trip_row.get('shape_id') or '').strip()
-                if static_sid and static_sid in shapes_pts and len(shapes_pts.get(static_sid, [])) >= 2:
-                    chosen_original_shape_id = static_sid
-                    chosen_original_trip_id = t['trip_id']
-
-        details_tables_by_entity[ent_id] = detail_rows
-
-        # Replacement stops (ROSE)
-        tmp_points: List[List[Any]] = []
-        seen_keys: Set[Tuple[float, float, str]] = set()
-        for m in ent_obj.modifications:
-            for rs in m.replacement_stops:
-                label = (rs.id or rs.stop_id or "").strip()
-                la = rs.stop_lat
-                lo = rs.stop_lon
-                if (la is None or lo is None) and rs.stop_id:
-                    info = stops_info.get(rs.stop_id)
-                    if info:
-                        la = info.get("lat"); lo = info.get("lon")
-                if la is None or lo is None:
-                    continue
-                key = (round(la, 7), round(lo, 7), label)
-                if key in seen_keys:
-                    continue
-                tmp_points.append([la, lo, label if label else "replacement_stop"])
-                seen_keys.add(key)
-        temp_stops_points_by_entity[ent_id] = tmp_points
-
-        # Tracé originel / shape_id
-        if chosen_original_shape_id:
-            orig = shapes_pts.get(chosen_original_shape_id, [])
-            original_poly_by_entity[ent_id] = [[la, lo] for (la, lo) in orig]
-            original_shape_id_by_entity[ent_id] = chosen_original_shape_id
-        else:
-            original_poly_by_entity[ent_id] = []
-            original_shape_id_by_entity[ent_id] = None
-
-        # Arrêts du tracé originel
-        orig_pts: List[List[Any]] = []
-        orig_ids: List[str] = []
-        if chosen_original_trip_id:
-            st_list_for_orig = gtfs.stop_times.get(chosen_original_trip_id, [])
-            for rec in st_list_for_orig:
-                sid = (rec.get('stop_id') or '').strip()
-                if not sid:
-                    continue
-                info = stops_info.get(sid)
-                if not info:
-                    continue
-                la, lo = info.get("lat"), info.get("lon")
-                if la is None or lo is None:
-                    continue
-                orig_pts.append([la, lo, sid])
-                orig_ids.append(sid)
-        original_stop_points_by_entity[ent_id] = orig_pts
-        original_stop_ids_by_entity[ent_id] = orig_ids
-
-    # shapes (détour RT) → JSON‑compatibles
-    shapes_plain: Dict[str, List[List[float]]] = {
-        sid: [[la, lo] for (la, lo) in coords] for sid, coords in rt_shapes.shapes.items()
-    }
-
-    # KPI GTFS
+    # 4) KPI GTFS
     gtfs_kpi = dict(
         trips=len(gtfs.trips),
         stop_times=sum(len(v) for v in gtfs.stop_times.values()),
         stops_present=len(gtfs.stops_present),
     )
+    
+    total_shapes = len(rt_shapes.shapes)
 
+    # 5) Assemblage final des résultats
     return {
         "schema_version": schema,
         "feed_json": feed_json,
-        "reports": reports_plain,
-        "totals": totals,
         "total_shapes": total_shapes,
         "needed_trip_ids": list(tid_sorted),
         "needed_stop_ids": list(sid_sorted),
-        "details_tables_by_entity": details_tables_by_entity,
-        "temp_stops_points_by_entity": temp_stops_points_by_entity,
-        "shape_for_plot_by_entity": shape_for_plot_by_entity,
-        "shapes_plain": shapes_plain,
-        "original_poly_by_entity": original_poly_by_entity,
-        "original_shape_id_by_entity": original_shape_id_by_entity,
-        "original_stop_points_by_entity": original_stop_points_by_entity,
-        "original_stop_ids_by_entity": original_stop_ids_by_entity,
-        "added_segments_by_entity": added_segments_by_entity,
-        "canceled_segments_by_entity": canceled_segments_by_entity,
         "gtfs_kpi": gtfs_kpi,
         "present_trip_ids": present_trip_ids,
         "missing_trip_ids": missing_trip_ids,
+        **analysis_results # Intègre tous les dictionnaires de l'analyse
     }
 
 
