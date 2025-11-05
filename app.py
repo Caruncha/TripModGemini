@@ -866,6 +866,7 @@ def analyze_tripmods_with_gtfs(gtfs: GtfsStatic, ents: List[TripModEntity]) -> T
 
 
 # 8) Folium — carte (détour ROUGE) + originel (VERT) + arrêts originels (BLANC/vert/rouge) + replacements (ROSE) + segments ajoutés/annulés
+# 8) Folium — carte (détour ROUGE) + originel (VERT) + arrêts originels (BLANC/vert/rouge) + replacements (ROSE) + segments ajoutés/annulés
 def build_folium_map_for_polyline(
     poly: List[Tuple[float, float]],
     shape_id: Optional[str] = None,
@@ -897,23 +898,33 @@ def build_folium_map_for_polyline(
         min_zoom=8
     )
 
-    # Détour (rouge vif)
+    # --- NOUVEAU : Création des groupes de couches (FeatureGroups) ---
+    fg_detour = folium.FeatureGroup(name="Détour RT (Rouge)", show=True)
+    fg_original = folium.FeatureGroup(name="Tracé Originel GTFS (Vert)", show=True)
+    fg_replacements = folium.FeatureGroup(name="Arrêts Remplacement (Rose)", show=True)
+    fg_added = folium.FeatureGroup(name="Segments Ajoutés (Turquoise)", show=True)
+    fg_canceled = folium.FeatureGroup(name="Segments Annulés (Violet)", show=True)
+
+    # --- MODIFIÉ : Ajout des éléments aux groupes respectifs ---
+
+    # Détour (rouge vif) -> fg_detour
     folium.PolyLine(
         locations=latlons_poly,
         color="#f70707",
         weight=5,
         opacity=0.9,
         tooltip=f"shape_id (détour): {shape_id or 'n/a'}",
-    ).add_to(m)
+    ).add_to(fg_detour)
     folium.CircleMarker(latlons_poly[0], radius=6, color="green",
-                        fill=True, fill_opacity=0.9, tooltip="Départ du détour").add_to(m)
+                        fill=True, fill_opacity=0.9, tooltip="Départ du détour").add_to(fg_detour)
     folium.CircleMarker(latlons_poly[-1], radius=6, color="red",
-                        fill=True, fill_opacity=0.9, tooltip="Arrivée du détour").add_to(m)
+                        fill=True, fill_opacity=0.9, tooltip="Arrivée du détour").add_to(fg_detour)
 
     # Segments ajoutés/annulés
     all_ext_points: List[Tuple[float, float]] = []
 
-    def _draw_segments(segments, color, label):
+    # MODIFIÉ : _draw_segments prend maintenant un FeatureGroup en argument
+    def _draw_segments(segments, color, label, feature_group):
         nonlocal all_ext_points
         if not segments:
             return
@@ -926,13 +937,13 @@ def build_folium_map_for_polyline(
                     weight=6,
                     opacity=0.95,
                     tooltip=f"{label} (shape_id: {shape_id or 'n/a'})",
-                ).add_to(m)
+                ).add_to(feature_group) # Ajout au groupe
                 all_ext_points.extend(seg_ll)
 
-    _draw_segments(added_segments, "#40E0D0", "Ajouté")      # turquoise
-    _draw_segments(canceled_segments, "#8A2BE2", "Annulé")   # violet
+    _draw_segments(added_segments, "#40E0D0", "Ajouté", fg_added)      # -> fg_added
+    _draw_segments(canceled_segments, "#8A2BE2", "Annulé", fg_canceled)   # -> fg_canceled
 
-    # Tracé originel (VERT)
+    # Tracé originel (VERT) -> fg_original
     if original_poly and len(original_poly) >= 2:
         latlons_orig = [(la, lo) for la, lo in original_poly if _valid_ll(la, lo)]
         if len(latlons_orig) >= 2:
@@ -942,9 +953,9 @@ def build_folium_map_for_polyline(
                 weight=4,
                 opacity=0.85,
                 tooltip=f"Tracé originel (shapes.txt): {original_shape_id or 'n/a'}",
-            ).add_to(m)
+            ).add_to(fg_original)
 
-    # Arrêts du tracé originel
+    # Arrêts du tracé originel -> fg_original
     if original_stop_points:
         n = len(original_stop_points)
         for idx, (la, lo, lab) in enumerate(original_stop_points):
@@ -965,9 +976,9 @@ def build_folium_map_for_polyline(
                 fill_opacity=0.95,
                 weight=2,
                 tooltip=str(lab or "stop_id")
-            ).add_to(m)
+            ).add_to(fg_original)
 
-    # Replacement stops (ROSE)
+    # Replacement stops (ROSE) -> fg_replacements
     if replacement_stop_points:
         for la, lo, lab in replacement_stop_points:
             if _valid_ll(la, lo):
@@ -980,9 +991,17 @@ def build_folium_map_for_polyline(
                     fill_opacity=0.95,
                     weight=2,
                     tooltip=lab or "Arrêt de remplacement"
-                ).add_to(m)
+                ).add_to(fg_replacements)
 
+    # --- NOUVEAU : Ajout des groupes à la carte ---
+    fg_detour.add_to(m)
+    fg_original.add_to(m)
+    fg_replacements.add_to(m)
+    fg_added.add_to(m)
+    fg_canceled.add_to(m)
+    
     # Emprise STRICTE sur le détour + segments ajoutés/annulés
+    # (Cette logique reste inchangée)
     bbox_pts = latlons_poly + all_ext_points if all_ext_points else latlons_poly
     lats = [la for la, _ in bbox_pts]
     lons = [lo for _, lo in bbox_pts]
@@ -995,8 +1014,11 @@ def build_folium_map_for_polyline(
     sw = (min_lat - pad_lat, min_lon - pad_lon)
     ne = (max_lat + pad_lat, max_lon + pad_lon)
     m.fit_bounds([sw, ne], padding=(30, 30))
-    return m
 
+    # --- NOUVEAU : Ajout du sélecteur de couches ---
+    folium.LayerControl(collapsed=False).add_to(m)
+
+    return m
 
 # 9) CACHE — split resource/data + carte HTML en cache resource
 def _hash_bytes(b: bytes) -> str:
