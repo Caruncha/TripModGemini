@@ -1,0 +1,9 @@
+streamlit
+gtfs-kit
+pandas
+numpy
+folium
+polyline
+requests # Pour l'installation de gtfs-realtime-bindings si nécessaire
+protobuf
+gtfs-realtime-bindings # Pour parser les fichiers .pb
