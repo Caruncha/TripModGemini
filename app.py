@@ -385,6 +385,8 @@ def parse_tripmods_protobuf(data: bytes) -> List[TripModEntity]:
         ))
     return out
 
+# Ligne 538 : MODIFIER ENTIÈREMENT CETTE FONCTION
+
 def _collect_shapes_pb(data: bytes, decode_mode: str) -> RtShapes:
     shapes: Dict[str, List[Tuple[float, float]]] = {}
     added_by_sid: Dict[str, List[List[Tuple[float, float]]]] = {}
@@ -395,36 +397,49 @@ def _collect_shapes_pb(data: bytes, decode_mode: str) -> RtShapes:
             from google.transit import gtfs_realtime_pb2 as proto
         except Exception:
             return RtShapes(shapes)
+    
+    # 1. Parsing du message Protobuf
     feed = proto.FeedMessage(); feed.ParseFromString(data)
+    
+    # 2. Itération sur les entités
     for ent in feed.entity:
+        # On vérifie que l'entité contient bien un message 'shape'
         if hasattr(ent, 'shape') and ent.shape:
             sid = str(getattr(ent.shape, 'shape_id', '') or '')
             enc = getattr(ent.shape, 'encoded_polyline', None)
+            
+            # Traitement de la polyline principale
             if sid and enc:
                 try:
                     shapes[sid] = decode_polyline(enc, mode=decode_mode)
                 except Exception:
                     pass
 
+            # Traitement des segments ajoutés/annulés
             if sid:
-                # FIX: Accès direct et robuste aux champs répétés (avec défaut [])
-                added_polys = getattr(ent.shape, 'added_encoded_polylines', [])
-                for enc2 in added_polys:
-                    try:
-                        coords = decode_polyline(enc2, mode=decode_mode)
-                        if len(coords) >= 2:
-                            added_by_sid.setdefault(sid, []).append(coords)
-                    except Exception:
-                        pass
+                
+                # RE-FIX: Utilisation de hasattr + accès direct
+                
+                # Segments ajoutés (Turquoise)
+                if hasattr(ent.shape, 'added_encoded_polylines'):
+                    # L'accès direct à l'attribut d'un champ répété retourne un conteneur itérable (même vide)
+                    for enc2 in ent.shape.added_encoded_polylines:
+                        try:
+                            coords = decode_polyline(enc2, mode=decode_mode)
+                            if len(coords) >= 2:
+                                added_by_sid.setdefault(sid, []).append(coords)
+                        except Exception:
+                            pass
 
-                canceled_polys = getattr(ent.shape, 'canceled_encoded_polylines', [])
-                for enc2 in canceled_polys:
-                    try:
-                        coords = decode_polyline(enc2, mode=decode_mode)
-                        if len(coords) >= 2:
-                            canceled_by_sid.setdefault(sid, []).append(coords)
-                    except Exception:
-                        pass
+                # Segments annulés (Violet)
+                if hasattr(ent.shape, 'canceled_encoded_polylines'):
+                    for enc2 in ent.shape.canceled_encoded_polylines:
+                        try:
+                            coords = decode_polyline(enc2, mode=decode_mode)
+                            if len(coords) >= 2:
+                                canceled_by_sid.setdefault(sid, []).append(coords)
+                        except Exception:
+                            pass
 
     return RtShapes(shapes=shapes, added_segments=added_by_sid, canceled_segments=canceled_by_sid)
 
