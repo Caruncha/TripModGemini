@@ -1087,8 +1087,8 @@ def cache_views(tripmods_bytes: bytes, gtfs_bytes: bytes, decode_flag: str, sche
     stops_info = getattr(gtfs, "stops_info", {}) or {}
     shapes_pts = getattr(gtfs, "shapes_points", {}) or {}
 
-    for r in reports:
-        ent_id = r.entity_id
+    for r in reports_plain:  # <-- Utiliser reports_plain (la liste de dicts)
+        ent_id = r['entity_id']  # <-- Accès par clé
         ent_obj = next((e for e in ents if e.entity_id == ent_id), None)
         if not ent_obj or not ent_obj.modifications:
             continue
@@ -1119,7 +1119,7 @@ def cache_views(tripmods_bytes: bytes, gtfs_bytes: bytes, decode_flag: str, sche
         chosen_original_trip_id: Optional[str] = None
 
         # r.trips est une liste de dict (asdict sur dataclasses)
-        for t in r.trips:
+        for t in r['trips']:  # <-- Accès par clé
             st_list = gtfs.stop_times.get(t['trip_id'], [])
             stop_times_count = len(st_list)
 
