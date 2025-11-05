@@ -405,24 +405,27 @@ def _collect_shapes_pb(data: bytes, decode_mode: str) -> RtShapes:
                     shapes[sid] = decode_polyline(enc, mode=decode_mode)
                 except Exception:
                     pass
-            # NEW: added/canceled (repeated string)
+
             if sid:
-                if hasattr(ent.shape, 'added_encoded_polylines'):
-                    for enc2 in getattr(ent.shape, 'added_encoded_polylines'):
-                        try:
-                            coords = decode_polyline(enc2, mode=decode_mode)
-                            if len(coords) >= 2:
-                                added_by_sid.setdefault(sid, []).append(coords)
-                        except Exception:
-                            pass
-                if hasattr(ent.shape, 'canceled_encoded_polylines'):
-                    for enc2 in getattr(ent.shape, 'canceled_encoded_polylines'):
-                        try:
-                            coords = decode_polyline(enc2, mode=decode_mode)
-                            if len(coords) >= 2:
-                                canceled_by_sid.setdefault(sid, []).append(coords)
-                        except Exception:
-                            pass
+                # FIX: Accès direct et robuste aux champs répétés (avec défaut [])
+                added_polys = getattr(ent.shape, 'added_encoded_polylines', [])
+                for enc2 in added_polys:
+                    try:
+                        coords = decode_polyline(enc2, mode=decode_mode)
+                        if len(coords) >= 2:
+                            added_by_sid.setdefault(sid, []).append(coords)
+                    except Exception:
+                        pass
+
+                canceled_polys = getattr(ent.shape, 'canceled_encoded_polylines', [])
+                for enc2 in canceled_polys:
+                    try:
+                        coords = decode_polyline(enc2, mode=decode_mode)
+                        if len(coords) >= 2:
+                            canceled_by_sid.setdefault(sid, []).append(coords)
+                    except Exception:
+                        pass
+
     return RtShapes(shapes=shapes, added_segments=added_by_sid, canceled_segments=canceled_by_sid)
 
 # -- TEXTPROTO (dump ASCII) --
