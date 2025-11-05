@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import json
+import zipfile
 from google.transit import gtfs_realtime_pb2
 import gtfs_kit as gk
 import folium
@@ -22,8 +23,14 @@ def load_gtfs(uploaded_file):
     """Charge le GTFS zippé et retourne l'objet GTFSkit."""
     if uploaded_file is not None:
         try:
-            # Assurez-vous que le fichier est lu comme un zip
-            feed = gk.read_feed(uploaded_file, 'zip')
+            # Lire le contenu binaire du fichier UploadedFile
+            file_bytes = uploaded_file.read()
+            
+            # Utiliser io.BytesIO pour créer un buffer en mémoire
+            zip_buffer = io.BytesIO(file_bytes)
+            
+            # Passer le buffer à gtfs-kit.read_feed
+            feed = gk.read_feed(zip_buffer, 'zip')
             
             # Vérification basique de la qualité du feed
             if feed.is_valid():
@@ -33,10 +40,12 @@ def load_gtfs(uploaded_file):
             return feed
         except Exception as e:
             st.error(f"❌ Erreur lors du chargement du GTFS : {e}")
+            # Pour le débogage, vous pouvez décommenter la ligne suivante :
+            # st.exception(e) 
             return None
     return None
 
-@st.cache_data
+# AVANT: @st.cache_data
 def load_trip_modifications(uploaded_file, file_type):
     """Charge et parse le fichier TripModification (JSON ou PB)."""
     if uploaded_file is not None:
@@ -53,14 +62,14 @@ def load_trip_modifications(uploaded_file, file_type):
         elif file_type == 'pb':
             feed = gtfs_realtime_pb2.FeedMessage()
             try:
+                # La lecture ici est correcte, mais on ne cache plus le résultat.
                 feed.ParseFromString(file_bytes)
-                # Retourne l'objet Protobuf parsé
                 return feed 
             except Exception as e:
                 st.error(f"❌ Erreur lors du parsing du fichier Protobuf : {e}")
                 return None
     return None
-
+    
 def extract_modifications(tm_data):
     """Extrait toutes les modifications dans une liste unifiée, gérant PB et JSON."""
     modifications_list = []
