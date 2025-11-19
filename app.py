@@ -322,28 +322,82 @@ def _collect_shapes_json(feed: Dict[str, Any], mode: str) -> RtShapes:
 
 def parse_tripmods_protobuf(data: bytes) -> List[TripModEntity]:
     proto = gtfs_local
-    if proto is None: from google.transit import gtfs_realtime_pb2 as proto
-    feed = proto.FeedMessage(); feed.ParseFromString(data)
+    if proto is None:
+        from google.transit import gtfs_realtime_pb2 as proto
+    feed = proto.FeedMessage()
+    feed.ParseFromString(data)
     out = []
+    
     for ent in feed.entity:
-        if not ent.HasField('trip_modifications'): continue
+        # Vérification souple de l'existence du champ
+        if not (ent.HasField('trip_modifications') if hasattr(ent, 'HasField') else hasattr(ent, 'trip_modifications')):
+            continue
+            
         tm = ent.trip_modifications
-        sel = [SelectedTrips(trip_ids=list(s.trip_ids), shape_id=s.shape_id or None) for s in tm.selected_trips]
+        
+        # Gestion des selected_trips
+        sel = []
+        for s in tm.selected_trips:
+            # Lecture sécurisée des champs répétés et string
+            t_ids = list(s.trip_ids) if hasattr(s, 'trip_ids') else []
+            s_id = getattr(s, 'shape_id', None)
+            # Nettoyage chaîne vide
+            if s_id == "": s_id = None
+            sel.append(SelectedTrips(trip_ids=t_ids, shape_id=s_id))
+
         mods = []
         for m in tm.modifications:
             repl = []
             for rs in m.replacement_stops:
-                sid = rs.stop_id if rs.HasField('stop_id') else None
-                la = rs.stop_lat if rs.HasField('stop_lat') else None
-                lo = rs.stop_lon if rs.HasField('stop_lon') else None
-                if sid or (la and lo):
-                    repl.append(ReplacementStop(stop_id=sid, id=rs.id if rs.HasField('id') else None, stop_lat=la, stop_lon=lo, travel_time_to_stop=rs.travel_time_to_stop))
+                # Utilisation de getattr pour éviter le crash HasField sur les floats
+                sid = getattr(rs, 'stop_id', None)
+                if sid == "": sid = None
+                
+                la = getattr(rs, 'stop_lat', None)
+                lo = getattr(rs, 'stop_lon', None)
+                
+                # Dans protobuf, la valeur par défaut est 0.0. 
+                # Si on a 0.0 exact, on considère souvent que c'est "non défini" en GTFS (sauf Null Island)
+                if la == 0.0 and lo == 0.0:
+                    la, lo = None, None
+                
+                rid = getattr(rs, 'id', None)
+                if rid == "": rid = None
+                
+                tt = getattr(rs, 'travel_time_to_stop', 0)
+
+                if sid or (la is not None and lo is not None):
+                    repl.append(ReplacementStop(
+                        stop_id=sid, 
+                        id=rid, 
+                        stop_lat=float(la) if la is not None else None, 
+                        stop_lon=float(lo) if lo is not None else None, 
+                        travel_time_to_stop=int(tt)
+                    ))
+
+            # Gestion sécurisée des StopSelectors
+            def _get_sel(sel_obj):
+                if not sel_obj: return StopSelector()
+                sq = getattr(sel_obj, 'stop_sequence', None)
+                # Si seq == 0, c'est valide en GTFS, donc on garde. Mais si c'est None (proto2), on garde None.
+                si = getattr(sel_obj, 'stop_id', None)
+                if si == "": si = None
+                return StopSelector(stop_sequence=sq, stop_id=si)
+
             mods.append(Modification(
-                start_stop_selector=StopSelector(stop_sequence=m.start_stop_selector.stop_sequence if m.start_stop_selector.HasField('stop_sequence') else None, stop_id=m.start_stop_selector.stop_id if m.start_stop_selector.HasField('stop_id') else None),
-                end_stop_selector=StopSelector(stop_sequence=m.end_stop_selector.stop_sequence if m.end_stop_selector.HasField('stop_sequence') else None, stop_id=m.end_stop_selector.stop_id if m.end_stop_selector.HasField('stop_id') else None),
-                replacement_stops=repl, propagated_modification_delay=m.propagated_modification_delay if m.HasField('propagated_modification_delay') else None
+                start_stop_selector=_get_sel(getattr(m, 'start_stop_selector', None)),
+                end_stop_selector=_get_sel(getattr(m, 'end_stop_selector', None)),
+                replacement_stops=repl,
+                propagated_modification_delay=getattr(m, 'propagated_modification_delay', None)
             ))
-        out.append(TripModEntity(entity_id=str(ent.id), selected_trips=sel, service_dates=list(tm.service_dates), start_times=list(tm.start_times), modifications=mods))
+
+        out.append(TripModEntity(
+            entity_id=str(ent.id),
+            selected_trips=sel,
+            service_dates=list(tm.service_dates) if hasattr(tm, 'service_dates') else [],
+            start_times=list(tm.start_times) if hasattr(tm, 'start_times') else [],
+            modifications=mods
+        ))
     return out
 
 def _collect_shapes_pb(data: bytes, mode: str) -> RtShapes:
