@@ -6,7 +6,6 @@ protobuf>=4.25
 pydeck>=0.9
 vega-datasets>=0.9
 polyline>=1.4.0
-haversine>=2.9.0
 
 # --- nouveaux paquets pour la carte ---
 folium>=0.15.0
